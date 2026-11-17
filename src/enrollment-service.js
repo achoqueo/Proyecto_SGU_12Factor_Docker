@@ -1,113 +1,152 @@
-// Importar el pool que gestiona las conexiones a PostgreSQL.
-import { pool } from "./db.js";
-// Importar errores controlados del dominio.
-import { AppError } from "./errors.js";
+'use strict';
 
-// Crear una matrícula para un estudiante en una sección.
-export async function createEnrollment({ studentId, sectionId, requestId }) {
-  // Rechazar identificadores que no sean enteros positivos.
+const { AppError } = require('./errors');
+
+function validateEnrollmentInput(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw new AppError(422, 'VALIDATION_ERROR', 'El cuerpo de la solicitud debe ser un objeto JSON.');
+  }
+
+  const studentId = Number(payload.studentId);
+  const sectionId = Number(payload.sectionId);
+
   if (!Number.isInteger(studentId) || studentId <= 0) {
-    // Comunicar una validación de entrada sin consultar la base de datos.
-    throw new AppError("studentId debe ser un entero positivo.", "INVALID_STUDENT_ID", 422);
+    throw new AppError(422, 'VALIDATION_ERROR', 'El campo studentId debe ser un entero positivo.');
   }
-  // Validar el identificador de la sección.
   if (!Number.isInteger(sectionId) || sectionId <= 0) {
-    // Comunicar el error de validación de sección.
-    throw new AppError("sectionId debe ser un entero positivo.", "INVALID_SECTION_ID", 422);
+    throw new AppError(422, 'VALIDATION_ERROR', 'El campo sectionId debe ser un entero positivo.');
   }
 
-  // Obtener una conexión exclusiva para la transacción.
-  const client = await pool.connect();
-  // Inicializar una variable para conocer si la transacción comenzó.
-  let transactionStarted = false;
+  return { studentId, sectionId };
+}
 
-  try {
-    // Iniciar la transacción para evitar escrituras parciales.
-    await client.query("BEGIN");
-    // Marcar que la transacción ya puede requerir rollback.
-    transactionStarted = true;
+class EnrollmentService {
+  constructor(pool, logger) {
+    this.pool = pool;
+    this.logger = logger;
+  }
 
-    // Bloquear la sección mientras se verifica y registra la matrícula.
-    const sectionResult = await client.query(
-      `SELECT s.id, s.academic_period_id, s.vacancies, s.enrolled,
-              p.is_active
-       FROM sections s
-       JOIN academic_periods p ON p.id = s.academic_period_id
-       WHERE s.id = $1
-       FOR UPDATE OF s`,
-      [sectionId]
-    );
+  async getCatalog() {
+    const [studentsRes, sectionsRes] = await Promise.all([
+      this.pool.query('SELECT id, code, full_name, active FROM students ORDER BY id ASC'),
+      this.pool.query(
+        'SELECT id, course_code, course_name, period, capacity, enrolled_count, (capacity - enrolled_count) AS available FROM sections ORDER BY id ASC'
+      )
+    ]);
 
-    // Rechazar una sección inexistente.
-    if (sectionResult.rowCount === 0) {
-      throw new AppError("La sección solicitada no existe.", "SECTION_NOT_FOUND", 404);
+    return {
+      students: studentsRes.rows,
+      sections: sectionsRes.rows
+    };
+  }
+
+  async getDashboardData() {
+    const [studentsCount, enrollmentsCount, vacanciesSum, enrollmentsList] = await Promise.all([
+      this.pool.query('SELECT COUNT(*)::int AS total FROM students WHERE active = TRUE'),
+      this.pool.query('SELECT COUNT(*)::int AS total FROM enrollments'),
+      this.pool.query('SELECT COALESCE(SUM(capacity - enrolled_count), 0)::int AS total FROM sections'),
+      this.pool.query(`
+        SELECT e.id, e.student_id AS "studentId", s.code AS "studentCode", s.full_name AS "studentName",
+               e.section_id AS "sectionId", sec.course_code AS "courseCode", sec.course_name AS "courseName",
+               sec.period, e.status, e.created_at AS "createdAt"
+        FROM enrollments e
+        JOIN students s ON s.id = e.student_id
+        JOIN sections sec ON sec.id = e.section_id
+        ORDER BY e.id DESC
+      `)
+    ]);
+
+    return {
+      kpis: {
+        activeStudents: studentsCount.rows[0].total,
+        totalEnrollments: enrollmentsCount.rows[0].total,
+        availableVacancies: vacanciesSum.rows[0].total
+      },
+      enrollments: enrollmentsList.rows
+    };
+  }
+
+  async enroll({ studentId, sectionId }, requestId) {
+    const validInput = validateEnrollmentInput({ studentId, sectionId });
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const studentRes = await client.query(
+        'SELECT id, code, full_name, active FROM students WHERE id = $1',
+        [validInput.studentId]
+      );
+      if (studentRes.rowCount === 0) {
+        throw new AppError(404, 'STUDENT_NOT_FOUND', `El estudiante con ID ${validInput.studentId} no existe.`);
+      }
+      if (!studentRes.rows[0].active) {
+        throw new AppError(409, 'STUDENT_INACTIVE', 'El estudiante no se encuentra activo para matrícula.');
+      }
+
+      const sectionRes = await client.query(
+        'SELECT id, course_code, course_name, capacity, enrolled_count, period FROM sections WHERE id = $1 FOR UPDATE',
+        [validInput.sectionId]
+      );
+      if (sectionRes.rowCount === 0) {
+        throw new AppError(404, 'SECTION_NOT_FOUND', `La sección con ID ${validInput.sectionId} no existe.`);
+      }
+
+      const section = sectionRes.rows[0];
+
+      const dupRes = await client.query(
+        'SELECT id FROM enrollments WHERE student_id = $1 AND section_id = $2',
+        [validInput.studentId, validInput.sectionId]
+      );
+      if (dupRes.rowCount > 0) {
+        throw new AppError(409, 'DUPLICATE_ENROLLMENT', 'El estudiante ya está matriculado en esta sección.');
+      }
+
+      if (section.enrolled_count >= section.capacity) {
+        throw new AppError(409, 'NO_VACANCIES', 'La sección no cuenta con vacantes disponibles.');
+      }
+
+      const insertRes = await client.query(
+        `INSERT INTO enrollments (student_id, section_id, status, created_at)
+         VALUES ($1, $2, 'CONFIRMED', NOW())
+         RETURNING id, student_id, section_id, status, created_at`,
+        [validInput.studentId, validInput.sectionId]
+      );
+
+      await client.query(
+        'UPDATE sections SET enrolled_count = enrolled_count + 1 WHERE id = $1',
+        [validInput.sectionId]
+      );
+
+      await client.query('COMMIT');
+
+      const record = insertRes.rows[0];
+      if (this.logger) {
+        this.logger.info('Matrícula registrada exitosamente', {
+          requestId,
+          enrollmentId: record.id,
+          studentId: validInput.studentId,
+          sectionId: validInput.sectionId
+        });
+      }
+
+      return {
+        id: record.id,
+        studentId: record.student_id,
+        studentName: studentRes.rows[0].full_name,
+        sectionId: record.section_id,
+        courseCode: section.course_code,
+        courseName: section.course_name,
+        status: record.status,
+        createdAt: record.created_at
+      };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
-
-    // Obtener los datos bloqueados de la sección y su periodo.
-    const section = sectionResult.rows[0];
-
-    // Verificar que el periodo académico permita matrículas.
-    if (!section.is_active) {
-      throw new AppError("El periodo académico no está habilitado.", "PERIOD_CLOSED", 409);
-    }
-
-    // Comprobar que el estudiante exista antes de registrar la matrícula.
-    const studentResult = await client.query(
-      "SELECT id FROM students WHERE id = $1 AND is_active = TRUE",
-      [studentId]
-    );
-
-    // Rechazar estudiantes inexistentes o inactivos.
-    if (studentResult.rowCount === 0) {
-      throw new AppError("El estudiante no existe o está inactivo.", "STUDENT_NOT_FOUND", 404);
-    }
-
-    // Evitar que el mismo estudiante se matricule dos veces en la misma sección.
-    const duplicateResult = await client.query(
-      "SELECT id FROM enrollments WHERE student_id = $1 AND section_id = $2",
-      [studentId, sectionId]
-    );
-
-    // Devolver conflicto si ya existe la matrícula.
-    if (duplicateResult.rowCount > 0) {
-      throw new AppError("El estudiante ya está matriculado en esta sección.", "DUPLICATE_ENROLLMENT", 409);
-    }
-
-    // Verificar que la sección tenga vacantes disponibles.
-    if (section.enrolled >= section.vacancies) {
-      throw new AppError("La sección no tiene vacantes disponibles.", "NO_VACANCIES", 409);
-    }
-
-    // Insertar la matrícula y recuperar el identificador generado.
-    const enrollmentResult = await client.query(
-      `INSERT INTO enrollments (student_id, section_id, request_id)
-       VALUES ($1, $2, $3)
-       RETURNING id, student_id, section_id, created_at`,
-      [studentId, sectionId, requestId]
-    );
-
-    // Incrementar el contador de vacantes ocupadas dentro de la misma transacción.
-    await client.query(
-      "UPDATE sections SET enrolled = enrolled + 1 WHERE id = $1",
-      [sectionId]
-    );
-
-    // Confirmar las dos escrituras como una sola unidad atómica.
-    await client.query("COMMIT");
-    // Marcar la transacción como finalizada.
-    transactionStarted = false;
-
-    // Devolver el registro creado al controlador HTTP.
-    return enrollmentResult.rows[0];
-  } catch (error) {
-    // Revertir cualquier escritura si la transacción sigue abierta.
-    if (transactionStarted) {
-      await client.query("ROLLBACK");
-    }
-    // Propagar el error para que el middleware lo traduzca.
-    throw error;
-  } finally {
-    // Devolver siempre la conexión al pool, incluso si hubo error.
-    client.release();
   }
 }
+
+module.exports = { EnrollmentService, validateEnrollmentInput };

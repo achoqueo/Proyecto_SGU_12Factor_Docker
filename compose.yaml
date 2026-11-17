@@ -1,0 +1,56 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: sgu_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-sgu_matricula}
+      POSTGRES_USER: ${DB_USER:-sgu_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Debe definir DB_PASSWORD en su archivo .env}
+    volumes:
+      - sgu_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sgu_user} -d ${DB_NAME:-sgu_matricula}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - sgu_net
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sgu_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 8080
+      SERVICE_NAME: ${SERVICE_NAME:-sgu-matricula-api}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-sgu_matricula}
+      DB_USER: ${DB_USER:-sgu_user}
+      DB_PASSWORD: ${DB_PASSWORD:?Debe definir DB_PASSWORD en su archivo .env}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health/ready || exit 1"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+    networks:
+      - sgu_net
+
+volumes:
+  sgu_data:
+    name: sgu_data
+
+networks:
+  sgu_net:
+    driver: bridge
