@@ -1,50 +1,40 @@
-// Importar el módulo nativo para acceder al entorno del proceso.
-const env = process.env;
+'use strict';
 
-// Convertir una variable a entero y rechazar valores inválidos.
-function readInteger(name, fallback) {
-  // Obtener el valor de entorno o usar el valor predeterminado.
-  const raw = env[name] ?? String(fallback);
-  // Convertir el texto recibido a número entero.
-  const value = Number.parseInt(raw, 10);
-  // Comprobar que el resultado sea un entero válido.
-  if (!Number.isInteger(value)) {
-    // Detener el arranque porque la configuración es inválida.
-    throw new Error(`La variable ${name} debe ser un número entero.`);
+function parsePositiveInt(value, fallback, name) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
   }
-  // Devolver el valor validado.
-  return value;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`[CONFIG ERROR] La variable ${name} debe ser un entero positivo. Recibido: "${value}"`);
+  }
+  return parsed;
 }
 
-// Leer una variable obligatoria y evitar que se inicie con un valor vacío.
-function required(name) {
-  // Leer y limpiar espacios al inicio y al final.
-  const value = (env[name] ?? "").trim();
-  // Rechazar variables ausentes o vacías.
-  if (!value) {
-    // Informar únicamente el nombre de la variable, nunca su contenido.
-    throw new Error(`Falta la variable obligatoria ${name}.`);
+function loadConfig(env = process.env) {
+  const dbPassword = env.DB_PASSWORD;
+  if (!dbPassword || String(dbPassword).trim() === '') {
+    throw new Error('[CONFIG ERROR] Falta la variable obligatoria DB_PASSWORD en el entorno.');
   }
-  // Entregar el valor para construir la configuración.
-  return value;
+
+  const config = {
+    nodeEnv: env.NODE_ENV || 'development',
+    port: parsePositiveInt(env.PORT, 8080, 'PORT'),
+    serviceName: env.SERVICE_NAME || 'sgu-matricula-api',
+    logLevel: (env.LOG_LEVEL || 'info').toLowerCase(),
+    db: Object.freeze({
+      host: env.DB_HOST || 'localhost',
+      port: parsePositiveInt(env.DB_PORT, 5432, 'DB_PORT'),
+      database: env.DB_NAME || 'sgu_matricula',
+      user: env.DB_USER || 'sgu_user',
+      password: String(dbPassword),
+      maxPoolSize: parsePositiveInt(env.DB_POOL_MAX, 10, 'DB_POOL_MAX'),
+      idleTimeoutMillis: parsePositiveInt(env.DB_IDLE_TIMEOUT_MS, 30000, 'DB_IDLE_TIMEOUT_MS'),
+      connectionTimeoutMillis: parsePositiveInt(env.DB_CONN_TIMEOUT_MS, 5000, 'DB_CONN_TIMEOUT_MS')
+    })
+  };
+
+  return Object.freeze(config);
 }
 
-// Construir la configuración una sola vez al iniciar el proceso.
-export const config = Object.freeze({
-  // Identificar el entorno sin incluir secretos.
-  appEnv: env.APP_ENV ?? "development",
-  // Definir el puerto HTTP y permitir su modificación por entorno.
-  port: readInteger("PORT", 8080),
-  // Resolver el host del servicio PostgreSQL.
-  dbHost: required("DB_HOST"),
-  // Resolver el puerto TCP de PostgreSQL.
-  dbPort: readInteger("DB_PORT", 5432),
-  // Resolver el nombre de la base de datos.
-  dbDatabase: required("DB_DATABASE"),
-  // Resolver el usuario de conexión.
-  dbUsername: required("DB_USERNAME"),
-  // Resolver la contraseña desde el entorno de ejecución.
-  dbPassword: required("DB_PASSWORD"),
-  // Configurar el tiempo máximo de espera de conexión.
-  dbConnectTimeoutMs: readInteger("DB_CONNECT_TIMEOUT_MS", 3000)
-});
+module.exports = { loadConfig };

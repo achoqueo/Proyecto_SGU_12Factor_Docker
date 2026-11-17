@@ -1,106 +1,69 @@
-// Importar el pool compartido con la configuración de entorno.
-import { pool } from "../db.js";
-// Importar el logger para registrar el proceso administrativo.
-import { log } from "../logger.js";
+'use strict';
 
-// Definir el esquema inicial del módulo de matrícula.
-const schema = `
-  CREATE TABLE IF NOT EXISTS academic_periods (
-    id BIGSERIAL PRIMARY KEY,
-    name VARCHAR(30) NOT NULL,
-    is_active BOOLEAN NOT NULL DEFAULT FALSE
-  );
+const { loadConfig } = require('../config');
+const { createLogger } = require('../logger');
+const { createDb } = require('../db');
 
-  CREATE TABLE IF NOT EXISTS faculties (
-    id BIGSERIAL PRIMARY KEY,
-    name VARCHAR(150) NOT NULL UNIQUE
-  );
+const DDL = `
+CREATE TABLE IF NOT EXISTS students (
+  id SERIAL PRIMARY KEY,
+  code VARCHAR(20) UNIQUE NOT NULL,
+  full_name VARCHAR(120) NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE
+);
 
-  CREATE TABLE IF NOT EXISTS careers (
-    id BIGSERIAL PRIMARY KEY,
-    faculty_id BIGINT NOT NULL REFERENCES faculties(id),
-    name VARCHAR(150) NOT NULL,
-    level VARCHAR(10) NOT NULL DEFAULT 'S1',
-    UNIQUE (faculty_id, name)
-  );
+CREATE TABLE IF NOT EXISTS sections (
+  id SERIAL PRIMARY KEY,
+  course_code VARCHAR(20) NOT NULL,
+  course_name VARCHAR(120) NOT NULL,
+  period VARCHAR(20) NOT NULL,
+  capacity INT NOT NULL CHECK (capacity > 0),
+  enrolled_count INT NOT NULL DEFAULT 0 CHECK (enrolled_count >= 0 AND enrolled_count <= capacity),
+  UNIQUE (course_code, period)
+);
 
-  CREATE TABLE IF NOT EXISTS students (
-    id BIGSERIAL PRIMARY KEY,
-    university_code VARCHAR(20) NOT NULL UNIQUE,
-    full_name VARCHAR(150) NOT NULL,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    career_id BIGINT REFERENCES careers(id)
-  );
-  ALTER TABLE students ADD COLUMN IF NOT EXISTS career_id BIGINT REFERENCES careers(id);
-
-  CREATE TABLE IF NOT EXISTS sections (
-    id BIGSERIAL PRIMARY KEY,
-    course_code VARCHAR(20) NOT NULL,
-    section_code VARCHAR(10) NOT NULL,
-    academic_period_id BIGINT NOT NULL REFERENCES academic_periods(id),
-    vacancies INTEGER NOT NULL CHECK (vacancies >= 0),
-    enrolled INTEGER NOT NULL DEFAULT 0 CHECK (enrolled >= 0),
-    career_id BIGINT REFERENCES careers(id),
-    UNIQUE (course_code, section_code, academic_period_id),
-    CHECK (enrolled <= vacancies)
-  );
-
-  ALTER TABLE sections ADD COLUMN IF NOT EXISTS career_id BIGINT REFERENCES careers(id);
-
-  CREATE TABLE IF NOT EXISTS enrollments (
-    id BIGSERIAL PRIMARY KEY,
-    student_id BIGINT NOT NULL REFERENCES students(id),
-    section_id BIGINT NOT NULL REFERENCES sections(id),
-    request_id VARCHAR(100) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (student_id, section_id)
-  );
-
-  INSERT INTO academic_periods (id, name, is_active)
-  VALUES (1, '2026-II', TRUE)
-  ON CONFLICT (id) DO NOTHING;
-
-  INSERT INTO faculties (id, name) VALUES
-    (1, 'Facultad de Ingeniería'),
-    (2, 'Facultad de Ciencias'),
-    (3, 'Facultad de Ciencias Jurídicas y Empresariales')
-  ON CONFLICT (id) DO NOTHING;
-
-  INSERT INTO careers (id, faculty_id, name, level) VALUES
-    (1, 1, 'Ingeniería en Informática y Sistemas', 'S1'),
-    (2, 1, 'Ingeniería Civil', 'S1'),
-    (3, 2, 'Matemática', 'S1'),
-    (4, 3, 'Administración', 'S1')
-  ON CONFLICT (id) DO NOTHING;
-
-  INSERT INTO students (id, university_code, full_name, is_active, career_id) VALUES
-    (1, '20260001', 'Ana Torres Quispe', TRUE, 1),
-    (2, '20260002', 'Luis Mamani Flores', TRUE, 1),
-    (3, '20260003', 'María Choque Apaza', TRUE, 2),
-    (4, '20260004', 'Carlos Condori Rojas', TRUE, 3),
-    (5, '20260005', 'Valeria Nina Cárdenas', TRUE, 4)
-  ON CONFLICT (id) DO UPDATE SET career_id = EXCLUDED.career_id;
-
-  INSERT INTO sections (id, course_code, section_code, academic_period_id, vacancies, enrolled, career_id) VALUES
-    (1, 'ESIS-101', 'A', 1, 30, 0, 1),
-    (2, 'ICIV-201', 'A', 1, 25, 0, 2),
-    (3, 'MATE-110', 'A', 1, 20, 0, 3),
-    (4, 'ADMI-120', 'A', 1, 25, 0, 4)
-  ON CONFLICT (id) DO UPDATE SET career_id = EXCLUDED.career_id;
+CREATE TABLE IF NOT EXISTS enrollments (
+  id SERIAL PRIMARY KEY,
+  student_id INT NOT NULL REFERENCES students(id),
+  section_id INT NOT NULL REFERENCES sections(id),
+  status VARCHAR(20) NOT NULL DEFAULT 'CONFIRMED',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (student_id, section_id)
+);
 `;
 
-// Ejecutar la migración como proceso puntual, no como parte de cada petición HTTP.
-try {
-  // Aplicar el esquema y los datos de demostración.
-  await pool.query(schema);
-  // Registrar la finalización de la migración.
-  log("INFO", "migration_completed");
-} catch (error) {
-  // Registrar el fallo de la tarea administrativa.
-  log("ERROR", "migration_failed", { message: error.message });
-  // Propagar un código de salida distinto de cero al shell/CI.
-  process.exitCode = 1;
-} finally {
-  // Cerrar el pool porque este proceso puntual ya terminó.
-  await pool.end();
+const SEED = `
+INSERT INTO students (code, full_name, active) VALUES
+  ('2023-119001', 'Alexandra Valeria Choque Onofre', TRUE),
+  ('2023-119002', 'Alejandra Ramos Mamani', TRUE),
+  ('2023-119003', 'Diana Mamani Ramos', TRUE),
+  ('2023-119004', 'Jairo Zegarra Gutierrez', TRUE),
+  ('2023-119005', 'Estudiante Inactivo Prueba', FALSE)
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO sections (course_code, course_name, period, capacity, enrolled_count) VALUES
+  ('IS-501', 'Ingeniería de Software I - Grupo A', '2026-II', 30, 0),
+  ('BD-502', 'Base de Datos Avanzada - Grupo A', '2026-II', 25, 0),
+  ('CLOUD-503', 'Arquitectura Cloud Native - Grupo ÚNICO', '2026-II', 2, 0)
+ON CONFLICT (course_code, period) DO NOTHING;
+`;
+
+async function migrate() {
+  const config = loadConfig();
+  const logger = createLogger({ serviceName: config.serviceName, level: config.logLevel });
+  const db = createDb(config.db, logger);
+
+  try {
+    logger.info('Ejecutando migraciones DDL y datos iniciales (seed)...');
+    await db.pool.query(DDL);
+    await db.pool.query(SEED);
+    logger.info('Migración completada exitosamente.');
+  } finally {
+    await db.close();
+  }
 }
+
+migrate().catch((err) => {
+  process.stderr.write(`${JSON.stringify({ level: 'error', message: err.message })}\n`);
+  process.exit(1);
+});

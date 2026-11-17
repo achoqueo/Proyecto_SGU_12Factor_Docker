@@ -1,51 +1,49 @@
-// Importar el servidor HTTP nativo para controlar su ciclo de vida.
-import { createServer } from "node:http";
-// Importar la aplicación Express.
-import { app } from "./app.js";
-// Importar configuración validada.
-import { config } from "./config.js";
-// Importar el pool para cerrarlo al finalizar.
-import { pool } from "./db.js";
-// Importar logger estructurado.
-import { log } from "./logger.js";
+'use strict';
 
-// Crear el servidor HTTP a partir de la aplicación.
-const server = createServer(app);
+const { loadConfig } = require('./config');
+const { createLogger } = require('./logger');
+const { createDb } = require('./db');
+const { EnrollmentService } = require('./enrollment-service');
+const { createApp } = require('./app');
 
-// Iniciar el servicio en todas las interfaces del contenedor.
-server.listen(config.port, "0.0.0.0", () => {
-  // Registrar el arranque sin exponer credenciales.
-  log("INFO", "service_started", {
-    port: config.port,
-    environment: config.appEnv
+async function start() {
+  const config = loadConfig();
+  const logger = createLogger({ serviceName: config.serviceName, level: config.logLevel });
+  const db = createDb(config.db, logger);
+  const enrollmentService = new EnrollmentService(db.pool, logger);
+  const server = createApp({ config, db, enrollmentService, logger });
+
+  server.listen(config.port, '0.0.0.0', () => {
+    logger.info('Servidor iniciado correctamente', {
+      port: config.port,
+      nodeEnv: config.nodeEnv
+    });
   });
-});
 
-// Definir una función de cierre ordenado ante señales del sistema operativo.
-async function shutdown(signal) {
-  // Registrar qué señal inició el apagado.
-  log("INFO", "shutdown_started", { signal });
-  // Dejar de aceptar nuevas conexiones HTTP.
-  server.close(async () => {
-    try {
-      // Cerrar las conexiones del pool de PostgreSQL.
-      await pool.end();
-      // Registrar que el apagado finalizó correctamente.
-      log("INFO", "shutdown_completed", { signal });
-      // Finalizar el proceso con código de éxito.
-      process.exit(0);
-    } catch (error) {
-      // Registrar un error resumido de cierre.
-      log("ERROR", "shutdown_failed", { message: error.message });
-      // Finalizar con código de error.
+  async function shutdown(signal) {
+    logger.info(`Señal ${signal} recibida. Iniciando apagado ordenado...`);
+    server.close(async () => {
+      try {
+        await db.close();
+        logger.info('Pool de base de datos cerrado. Proceso finalizado.');
+        process.exit(0);
+      } catch (err) {
+        logger.error('Error cerrando conexiones de base de datos', { err });
+        process.exit(1);
+      }
+    });
+
+    setTimeout(() => {
+      logger.error('Tiempo de espera agotado para apagado ordenado. Forzando salida.');
       process.exit(1);
-    }
-  });
-  // Establecer un límite máximo de espera para evitar cierre infinito.
-  setTimeout(() => process.exit(1), 10000).unref();
+    }, 10000).unref();
+  }
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-// Atender la señal de terminación habitual de contenedores.
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-// Atender la señal de interrupción usada en desarrollo local.
-process.on("SIGINT", () => shutdown("SIGINT"));
+start().catch((err) => {
+  process.stderr.write(`${JSON.stringify({ level: 'error', message: err.message })}\n`);
+  process.exit(1);
+});

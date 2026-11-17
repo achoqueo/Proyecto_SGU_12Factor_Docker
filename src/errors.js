@@ -1,29 +1,50 @@
-// Definir un error de aplicación con código y estado HTTP controlados.
-export class AppError extends Error {
-  // Recibir mensaje seguro, código estable y estado HTTP.
-  constructor(message, code, status = 400) {
-    // Inicializar la clase Error con el mensaje.
+'use strict';
+
+class AppError extends Error {
+  constructor(statusCode, code, message, details = null) {
     super(message);
-    // Identificar la clase para diagnóstico y pruebas.
-    this.name = "AppError";
-    // Guardar un código interno que el cliente puede interpretar.
+    this.name = 'AppError';
+    this.statusCode = statusCode;
     this.code = code;
-    // Guardar el estado HTTP que debe devolver la API.
-    this.status = status;
+    this.details = details;
   }
 }
 
-// Traducir errores desconocidos a una respuesta genérica segura.
-export function publicError(error) {
-  // Si es un error conocido, exponer solo su mensaje controlado.
-  if (error instanceof AppError) {
-    // Devolver estado, código y mensaje permitidos para el consumidor.
-    return { status: error.status, code: error.code, message: error.message };
+function mapErrorToHttp(err) {
+  if (err instanceof AppError) {
+    return {
+      statusCode: err.statusCode,
+      body: {
+        error: {
+          code: err.code,
+          message: err.message,
+          ...(err.details ? { details: err.details } : {})
+        }
+      }
+    };
   }
-  // Ocultar detalles internos de errores inesperados.
+
+  if (err && err.code === '23505') {
+    return {
+      statusCode: 409,
+      body: {
+        error: {
+          code: 'DUPLICATE_ENROLLMENT',
+          message: 'El estudiante ya se encuentra matriculado en esta sección.'
+        }
+      }
+    };
+  }
+
   return {
-    status: 500,
-    code: "INTERNAL_ERROR",
-    message: "Ocurrió un error interno. Consulte el identificador de solicitud."
+    statusCode: 500,
+    body: {
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'Ocurrió un error interno al procesar la solicitud.'
+      }
+    }
   };
 }
+
+module.exports = { AppError, mapErrorToHttp };
